@@ -18,8 +18,8 @@ rl = RL(
 
 # rl.train("èsèkot", "sèkot")
 # rl.train("epangala'", "kala'")
-# rl.train("pangaleman", "alem")
-rl.train("sakejjhâ'", "kejjhâ'")
+rl.train("pangaleman", "alem")
+# rl.train("sakejjhâ'", "kejjhâ'")
 
 print(rl.bag_of_words)
 print(rl.bag_of_results)
