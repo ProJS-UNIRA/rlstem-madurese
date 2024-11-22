@@ -1,7 +1,7 @@
 import re
-from lib.rl import ReinforcementLearning as RL
-from lib.rules import rules
-from lib.functions import normalize_word, get_unicode_code
+from src.rlm import ReinforcementLearning as RL
+from src.rules import rules
+from src.functions import normalize_word
 
 corpus = open("data/lemma_expanded.txt").read().splitlines()
 for i, word in enumerate(corpus):
@@ -16,12 +16,15 @@ rl = RL(
     curriculum_episodes=500,
 )
 
-# rl.train("èsèkot", "sèkot")
+rl.train("èsèkot", "sèkot")
 # rl.train("epangala'", "kala'")
 # rl.train("pangaleman", "alem")
-rl.train("sakejjhâ'", "kejjhâ'")
+# rl.train("sakejjhâ'", "kejjhâ'")
 
-print(rl.bag_of_words)
-print(rl.bag_of_results)
+print(rl.predict("èkala'"))
+print(rl.predict("èsèkot"))
+print(rl.predict("ecampor"))
+# print(rl.bag_of_words)
+# print(rl.bag_of_results)
 
 
