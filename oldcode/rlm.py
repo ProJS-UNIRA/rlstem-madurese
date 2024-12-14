@@ -23,6 +23,7 @@ class ReinforcementLearning:
         epsilon_decay: float = 0.995, # epsilon decay
         min_epsilon: float = 0.01, # minimum epsilon
         curriculum_episodes: int = 100,
+        max_step_per_episode: int = 100,
     ):
         """
         Initialize the reinforcement learning model.
@@ -46,6 +47,7 @@ class ReinforcementLearning:
         self._previous_min_distance = float('inf')
         self._previous_num_results = 0
         self._last_rules = []
+        self._max_step_per_episode = max_step_per_episode
 
     @property
     def bag_of_words(self) -> list[str]:
@@ -54,6 +56,10 @@ class ReinforcementLearning:
     @property
     def bag_of_results(self) -> list[str]:
         return self._bag_of_results
+    
+    @property
+    def q_table(self) -> dict:
+        return self._q_table
 
     def _min_distance(self) -> float:
         """
@@ -61,12 +67,26 @@ class ReinforcementLearning:
         """
         return min(levenshtein_distance(word, self._target_word) 
                    for word in self._bag_of_words + self._bag_of_results) if self._bag_of_words or self._bag_of_results else float('inf')
+    
+    def _get_pattern_success(self) -> float:
+        """
+        Get the pattern success rate
+        """
+        if not self._last_rules:
+            return 0.0
+        successful_applications = sum(1 for rule_idx in self._last_rules 
+                                    if self._rules[rule_idx].pattern in str(self._bag_of_results))
+        return successful_applications / len(self._last_rules)
 
     def _get_state(self) -> str:
         """
-        Get the current state
-        Return a string that uniquely identifies the current state, containing:
+        Enhanced state representation incorporating more features
+        and historical information.
         """
+        # handle empty bag of words
+        if not self._bag_of_words and not self._bag_of_results:
+            return 'EMPTY|0|0|0|0|0'
+
         min_distance = self._min_distance()
         num_results = len(self._bag_of_results)
         num_rules_used = len(self._last_rules)
@@ -77,9 +97,17 @@ class ReinforcementLearning:
             score = len(word)
             score += sum(1 for rule in self._rules if re.search(rule.pattern, word))
             morphological_scores.append(score)
-        avg_complexity = sum(morphological_scores) / len(morphological_scores) if morphological_scores else 0
+        
+        avg_complexity = (
+            sum(morphological_scores) / len(morphological_scores) 
+            if morphological_scores else 0
+        )
 
-        state = f"{num_results}|{num_rules_used}|{min_distance:.2f}|{avg_complexity:.2f}"
+        # pattern success rate
+        pattern_success = self._get_pattern_success()
+        rule_hash = hash(''.join(str(rule) for rule in self._last_rules[-5:])) % 1000 # limit size
+
+        state = f"{num_results}|{num_rules_used}|{min_distance:.2f}|{avg_complexity:.2f}|{pattern_success:.2f}|{rule_hash}"
         return state
     
     def _calculate_reward(self) -> float:
@@ -91,7 +119,6 @@ class ReinforcementLearning:
         3. Whether the result exists in corpus
         4. Penalize empty results or worse transformations
         """
-        
         # base reward
         reward = 0
 
@@ -109,13 +136,17 @@ class ReinforcementLearning:
             reward += 5.0
 
         # extra reward if the target word is in the bag_of_results
-        if self._target_word in self._bag_of_results:
+        if self._target_word in self._bag_of_results and len(self._bag_of_results) > 1:
             reward += 3.0
 
         # penalize if number of rules used is increasing
         rule_penalty = -0.1 * len(self._last_rules)
         rule_penalty *= (1 + self._episode_count / self._curriculum_episodes) # scale with progress
         reward += rule_penalty
+
+        # penalize excessive transformations
+        if len(self._bag_of_words) > len(self._target_word) * 3:
+            reward -= 0.5
 
         # update previous state
         self._previous_min_distance = self._min_distance()
@@ -157,7 +188,7 @@ class ReinforcementLearning:
 
     def _update_q_table(self, current_state: str, action: int, reward: float, new_state: str) -> None:
         """
-        Update the Q-table
+        Update the Q-table and return terminal state
         """
         if current_state not in self._q_table:
             self._q_table[current_state] = {i: 0.0 for i in range(len(self._rules))}
@@ -165,19 +196,21 @@ class ReinforcementLearning:
             self._q_table[new_state] = {i: 0.0 for i in range(len(self._rules))}
 
         current_q = self._q_table[current_state][action]
-        next_max_q = max(self._q_table[new_state].values()) if self._q_table[new_state] else 0
-        
+
+        # if terminal state, don't include future rewards
+        is_terminal = self._target_word in self._bag_of_results
+        next_max_q = 0 if is_terminal else max(self._q_table[new_state].values())
+
         # Q-learning update formula
         new_q = current_q + self._learning_rate * (
             reward + 
-            self._discount_factor * next_max_q - current_q
+            (0 if is_terminal else self._discount_factor * next_max_q) - current_q
         )
+
         self._q_table[current_state][action] = new_q
 
         # Terminal condition if target reached
-        if self._target_word in self._bag_of_results:
-            return True
-        return False
+        return is_terminal
     
     def _apply_rule(self, rule_idx: int) -> None:
         """
@@ -247,7 +280,7 @@ class ReinforcementLearning:
         self._target_word = normalize_word(target_word)
 
         # train for multiple episodes
-        for _ in range(self._curriculum_episodes):
+        for episode in range(self._curriculum_episodes):
             # decay epsilon
             self._epsilon = max(self._min_epsilon, self._epsilon * self._epsilon_decay)
             # decay learning rate
@@ -258,9 +291,11 @@ class ReinforcementLearning:
             self._last_rules = []
             self._previous_min_distance = float('inf')
             self._previous_num_results = 0
+            self._episode_count += 1
 
             # run episode until terminal state
-            while True:
+            step_count = 0
+            while step_count < self._max_step_per_episode:
                 # get current state and choose action
                 current_state = self._get_state()
                 action = self._choose_action()
@@ -274,14 +309,13 @@ class ReinforcementLearning:
                 reward = self._calculate_reward()
 
                 # check if terminal state
-                terminal = self._target_word in self._bag_of_results
-
-                # update Q-table
-                self._update_q_table(current_state, action, reward, new_state)
+                terminal = self._update_q_table(current_state, action, reward, new_state)
 
                 if terminal:
                     break
                 
+                step_count += 1
+
     def predict(self, word: str) -> str:
         """
         Predict the stem of a word based on the trained model.
@@ -311,73 +345,53 @@ class ReinforcementLearning:
         max_steps = len(self._rules)
         step_count = 0
         
-        while step_count < max_steps:
-            current_state = self._get_state()
+        # while step_count < max_steps:
+        #     current_state = self._get_state()
             
-            # Get Q-values for current state
-            if current_state not in self._q_table:
-                # If state not in Q-table, initialize it
-                self._q_table[current_state] = {i: 0.0 for i in range(len(self._rules))}
+        #     # Get Q-values for current state
+        #     if current_state not in self._q_table:
+        #         # If state not in Q-table, initialize it
+        #         self._q_table[current_state] = {i: 0.0 for i in range(len(self._rules))}
             
-            # Get available actions (excluding already used rules)
-            used_rules_indices = set(self._last_rules)
-            available_actions = [
-                i for i in range(len(self._rules)) 
-                if i not in used_rules_indices
-            ]
+        #     # Get available actions (excluding already used rules)
+        #     used_rules_indices = set(self._last_rules)
+        #     available_actions = [
+        #         i for i in range(len(self._rules)) 
+        #         if i not in used_rules_indices
+        #     ]
             
-            if not available_actions:
-                break
+        #     if not available_actions:
+        #         break
                 
-            # Get Q-values for available actions
-            q_values = self._q_table[current_state]
-            available_q_values = {i: q_values[i] for i in available_actions}
+        #     # Get Q-values for available actions
+        #     q_values = self._q_table[current_state]
+        #     available_q_values = {i: q_values[i] for i in available_actions}
             
-            # Choose action with highest Q-value
-            best_action = max(available_q_values.items(), key=lambda x: x[1])[0]
+        #     # Choose action with highest Q-value
+        #     best_action = max(available_q_values.items(), key=lambda x: x[1])[0]
             
-            # Apply the chosen rule
-            prev_results_len = len(self._bag_of_results)
-            self._apply_rule(best_action)
+        #     # Apply the chosen rule
+        #     prev_results_len = len(self._bag_of_results)
+        #     self._apply_rule(best_action)
             
-            # Calculate score for current state
-            current_score = self._calculate_score()
+        #     # Calculate score for current state
+        #     current_score = self._calculate_score()
             
-            # Update best result if current state is better
-            if current_score > best_score and self._bag_of_results:
-                best_score = current_score
-                best_result = min(self._bag_of_results,
-                                key=lambda x: levenshtein_distance(x, word))
+        #     # Update best result if current state is better
+        #     if current_score > best_score and self._bag_of_results:
+        #         best_score = current_score
+        #         best_result = min(self._bag_of_results,
+        #                         key=lambda x: levenshtein_distance(x, word))
             
-            # Stop if we found results and no improvement in last step
-            if self._bag_of_results and len(self._bag_of_results) == prev_results_len:
-                break
+        #     # Stop if we found results and no improvement in last step
+        #     if self._bag_of_results and len(self._bag_of_results) == prev_results_len:
+        #         break
                 
-            step_count += 1
+        #     step_count += 1
         
-        return best_result
+        # return best_result
 
-    def _calculate_score(self) -> float:
-        """
-        Calculate a score for the current state based on:
-        - Number of results found in corpus
-        - Similarity to original word
-        - Number of rules applied
-        """
-        score = 0.0
-        
-        # Reward for finding results in corpus
-        score += len(self._bag_of_results) * 2.0
-        
-        # Penalty for number of rules used (prefer fewer rules)
-        score -= len(self._last_rules) * 0.5
-        
-        # Reward for minimum distance improvement
-        current_min_distance = self._min_distance()
-        if current_min_distance < self._previous_min_distance:
-            score += 1.0
-            
-        return score
+    
         
 
 
